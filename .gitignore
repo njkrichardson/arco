@@ -1,0 +1,5 @@
+# vscode 
+*vscode/
+
+# caches/eggs 
+*.egg-info
