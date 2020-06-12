@@ -1,0 +1,6 @@
+# vscode 
+*vscode/
+
+# caches/eggs 
+*.egg-info
+*__pycache__/
