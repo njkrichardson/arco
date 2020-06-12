@@ -1,0 +1,21 @@
+name: Picard 
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Running unittests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python 3.6.10
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.6.10
+    - name: Running unittests
+      run: pytest
