@@ -2,7 +2,10 @@
 Created on 14 May 2013
 @author: James McInerney
 
-Edited on 13 June 2020 
+Edits in June 2020: 
+    * refactor for better readability 
+    * docstrings 
+    * update to Python 3.6.10
 @author: njkr 
 '''
 import numpy as np 
@@ -13,14 +16,18 @@ from tqdm import tqdm
 from viz import create_cov_ellipse
 
 import sys 
+import pickle 
 import os 
 import shutil
 
+from picard.utils.io import save_object
+
 # ENV 
 RESULTS_DIR = '/Users/nickrichardson/Desktop/personal/projects/picard/tests/comparators/gmm_animations'
+DUMP_DIR = '/Users/nickrichardson/Desktop/personal/projects/picard/tests/comparators'
 npr.seed(2305)
 
-def simulate(n_components : int = 30, n_obs : int = 200, obs_dim : int = 2) -> np.ndarray:
+def simulate(n_components : int = 30, n_obs : int = 200, obs_dim : int = 2) -> tuple:
     """
     Generate samples from a mixture of Gaussians. 
 
@@ -42,7 +49,7 @@ def simulate(n_components : int = 30, n_obs : int = 200, obs_dim : int = 2) -> n
         z[i] = npr.multinomial(1, pi)
         k = np.argmax(z[i])
         inputs[i] =  npr.multivariate_normal(mu[k], cov[k])
-    return inputs, np.argmax(z, axis=1)
+    return (inputs, np.argmax(z, axis=1))
 
 def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : bool = True, save_every : int = 5 , max_iterations : int = 200):
     """
@@ -73,15 +80,15 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     for i in tqdm(range(max_iterations), disable=(not verbose)):
         # M step: update the "global" parameters 
         N_k = q_z.sum(axis=0)
-        beta_k = hyperpriors['beta_0'] + N_k
+        precision_scale = hyperpriors['prior_precision_scale'] + N_k
         inv_wishart_dof = hyperpriors['inv_wishart_dof'] + N_k + 1.
         weighted_means = get_weighted_means(q_z, inputs, N_k)
         covs = update_covs(q_z, inputs, weighted_means, N_k)
-        means = update_means(n_components, obs_dim, hyperpriors['beta_0'], hyperpriors['prior_mean'], N_k, weighted_means, beta_k)
-        precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['beta_0'], covs)
+        means = update_means(n_components, obs_dim, hyperpriors['prior_precision_scale'], hyperpriors['prior_mean'], N_k, weighted_means, precision_scale)
+        precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['prior_precision_scale'], covs)
 
         # E step: update the "local" variational distribution parameters
-        energy = get_energy(inputs, obs_dim, N_k, beta_k, means, precisions, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
+        energy = get_energy(inputs, obs_dim, N_k, precision_scale, means, precisions, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
         log_det_precision = get_log_det_precisions(precisions, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
         expected_log_pi = get_expected_log_pi(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
         q_z = update_variational_params(obs_dim, expected_log_pi, log_det_precision, energy, n_obs, n_components) #eqn 10.46 Bishop (really 10.46 taken through 10.49)
@@ -142,34 +149,34 @@ def update_covs(q_z : np.ndarray, inputs : np.ndarray, weighted_means : np.ndarr
             covs[k] /= N_k[k]
     return covs
 
-def update_precisions(n_components : int, prior_precision : float, weighted_means : np.ndarray, N_k : np.ndarray, prior_mean : np.ndarray, obs_dim : int, beta_0 : float, covs : list) -> list:
+def update_precisions(n_components : int, prior_precision : float, weighted_means : np.ndarray, N_k : np.ndarray, prior_mean : np.ndarray, obs_dim : int, prior_precision_scale : float, covs : list) -> list:
     covs_new = [None for _ in range(n_components)]
     for k in range(n_components): 
         covs_new[k]  = np.linalg.inv(prior_precision) + N_k[k] * covs[k]
         mean_dist = (weighted_means[k] - prior_mean).reshape(obs_dim, 1)
         sample_cov = np.dot(mean_dist, mean_dist.T)
-        covs_new[k] += (beta_0 * N_k[k] / (beta_0 + N_k[k]) ) * sample_cov
+        covs_new[k] += (prior_precision_scale * N_k[k] / (prior_precision_scale + N_k[k]) ) * sample_cov
 
     precisions = []
     for k in range(n_components):
         try:
             precisions.append(np.linalg.inv(covs_new[k]))
-        except linalg.linalg.LinAlgError as linalg_error:
+        except np.linalg.LinAlgError as linalg_error:
             print('Invalid update to precision matrix (uninvertible covariance)')
             raise linalg_error
     return precisions
 
-def update_means(n_components : int, obs_dim : int, beta_0 : float, prior_mean : np.ndarray, N_k : np.ndarray, weighted_means : np.ndarray, beta_k : float) -> np.ndarray:
+def update_means(n_components : int, obs_dim : int, prior_precision_scale : float, prior_mean : np.ndarray, N_k : np.ndarray, weighted_means : np.ndarray, beta_k : float) -> np.ndarray:
     means = np.zeros((n_components, obs_dim))
     for k in range(n_components): 
-        means[k] = (beta_0 * prior_mean + N_k[k] * weighted_means[k]) / beta_k[k]
+        means[k] = (prior_precision_scale * prior_mean + N_k[k] * weighted_means[k]) / beta_k[k]
     return means 
 
-def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, beta_k : float, means : np.ndarray, precisions : list, inv_wishart_dof : int, n_obs : int, n_components : int) -> np.ndarray:
+def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, precision_scale : float, means : np.ndarray, precisions : list, inv_wishart_dof : int, n_obs : int, n_components : int) -> np.ndarray:
     energy = np.zeros((n_obs, n_components))
     for i in range(n_obs):
         for k in range(n_components):
-            A = obs_dim / beta_k[k] #shape: (k,)
+            A = obs_dim / precision_scale[k] #shape: (k,)
             B0 = (inputs[i] - means[k]).reshape(obs_dim, 1)
             B1 = np.dot(precisions[k], B0)
             l = np.dot(B0.T, B1)
@@ -216,12 +223,17 @@ if __name__ == "__main__":
     obs_dim = 2 
     hyperpriors = {
         'mixture_concentration': 0.1,                     
-        'beta_0': (1e-20),  
+        'prior_precision_scale': (1e-20),  
         'inv_wishart_dof': obs_dim + 1., 
         'prior_mean': np.zeros(obs_dim), 
         'prior_precision': np.eye(obs_dim)
         }
 
     # run experiment 
-    means, log_det_precisions, expected_log_pi, q_z = run(inputs, n_components, hyperpriors)
+    means, log_det_precisions, expected_log_pi, q_z = run(inputs, n_components, hyperpriors, verbose=False)
+
+    # dump parameters 
+    experiment_params = {'hyperpriors': hyperpriors, 'observations': inputs, 'latent_variables': z, 'n_components': n_components}
+    save_object(experiment_params, os.path.join(DUMP_DIR, 'gmm.pkl')) 
+
     
