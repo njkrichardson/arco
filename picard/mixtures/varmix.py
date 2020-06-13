@@ -64,13 +64,8 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     # observations 
     (n_obs, obs_dim) = inputs.shape 
     
-    # initialize latent assignments distributions 
+    # initialize variational parameters
     q_z = np.array([npr.dirichlet(np.ones(n_components)) for _ in range(n_obs)])
-
-    plt.ion()    
-    fig = plt.figure(figsize=(10, 10))
-    ax_spatial = fig.add_subplot(1, 1, 1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
-    circs = []
                 
     for i in tqdm(range(max_iterations), disable=(not verbose)):
         # M step: update the "global" parameters 
@@ -83,17 +78,20 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
         precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['beta_0'], covs)
 
         # E step: update the "local" variational distribution parameters
-        mu = Muopt(inputs, obs_dim, N_k, beta_k, means, precisions, weighted_means, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
-        invc = Invcopt(precisions, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
-        pik = Piopt(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
-        q_z = Zopt(obs_dim, pik, invc, mu, n_obs, n_components) #eqn 10.46 Bishop
+        energy = get_energy(inputs, obs_dim, N_k, beta_k, means, precisions, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
+        log_det_precision = get_log_det_precisions(precisions, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
+        expected_log_pi = get_expected_log_pi(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
+        q_z = update_variational_params(obs_dim, expected_log_pi, log_det_precision, energy, n_obs, n_components) #eqn 10.46 Bishop (really 10.46 taken through 10.49)
         
-        if (verbose is True) and (i % save_every == 0):
+        if verbose is True: 
+            plt.ion()    
+            fig = plt.figure(figsize=(10, 10))
+            ax_spatial = fig.add_subplot(1, 1, 1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
+            circs = []
             if i == 0:
-                # sctinputs = plt.scatter(inputs[:,0], inputs[:,1])
                 plt.scatter(inputs[:, 0], inputs[:, 1])
                 sctZ = plt.scatter(means[:, 0], means[:, 1], color='r')
-            else:
+            elif (i % save_every == 0):
                 #ellipses to show covariance of components
                 for circ in circs: circ.remove()
                 circs = []
@@ -112,7 +110,7 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     if verbose is True:
         pass
     
-    return m, invc, pik, q_z
+    return means, log_det_precision, expected_log_pi, q_z
     
     
 def get_weighted_means(q_z : np.ndarray, inputs : np.ndarray, N_k : np.ndarray) -> np.ndarray:
@@ -147,20 +145,21 @@ def update_covs(q_z : np.ndarray, inputs : np.ndarray, weighted_means : np.ndarr
     return covs
 
 def update_precisions(n_components : int, prior_precision : float, weighted_means : np.ndarray, N_k : np.ndarray, prior_mean : np.ndarray, obs_dim : int, beta_0 : float, covs : list) -> list:
-    Winv = [None for _ in range(n_components)]
+    covs_new = [None for _ in range(n_components)]
     for k in range(n_components): 
-        Winv[k]  = np.linalg.inv(prior_precision) + N_k[k] * covs[k]
-        Q0 = (weighted_means[k,:] - prior_mean).reshape(obs_dim, 1)
-        q = np.dot(Q0, Q0.T)
-        Winv[k] += (beta_0 * N_k[k] / (beta_0 + N_k[k]) ) * q
+        covs_new[k]  = np.linalg.inv(prior_precision) + N_k[k] * covs[k]
+        mean_dist = (weighted_means[k] - prior_mean).reshape(obs_dim, 1)
+        sample_cov = np.dot(mean_dist, mean_dist.T)
+        covs_new[k] += (beta_0 * N_k[k] / (beta_0 + N_k[k]) ) * sample_cov
 
-    W = []
+    precisions = []
     for k in range(n_components):
         try:
-            W.append(np.linalg.inv(Winv[k]))
-        except linalg.linalg.LinAlgError:
-            raise linalg.linalg.LinAlgError()
-    return W
+            precisions.append(np.linalg.inv(covs_new[k]))
+        except linalg.linalg.LinAlgError as linalg_error:
+            print('Invalid update to precision matrix (uninvertible covariance)')
+            raise linalg_error
+    return precisions
 
 def update_means(n_components : int, obs_dim : int, beta_0 : float, prior_mean : np.ndarray, N_k : np.ndarray, weighted_means : np.ndarray, beta_k : float) -> np.ndarray:
     means = np.zeros((n_components, obs_dim))
@@ -168,48 +167,51 @@ def update_means(n_components : int, obs_dim : int, beta_0 : float, prior_mean :
         means[k] = (beta_0 * prior_mean + N_k[k] * weighted_means[k]) / beta_k[k]
     return means 
 
-def Muopt(inputs, obs_dim, N_k, beta_k, m, W, xd, inv_wishart_dof, n_obs, n_components):
-    Mu = zeros((n_obs, n_components))
-    for n in range(n_obs):
+def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, beta_k : float, means : np.ndarray, precisions : list, inv_wishart_dof : int, n_obs : int, n_components : int) -> np.ndarray:
+    energy = np.zeros((n_obs, n_components))
+    for i in range(n_obs):
         for k in range(n_components):
             A = obs_dim / beta_k[k] #shape: (k,)
-            B0 = reshape((inputs[n] - m[k]),(obs_dim, 1))
-            B1 = dot(W[k], B0)
-            l = dot(B0.T, B1)
+            B0 = (inputs[i] - means[k]).reshape(obs_dim, 1)
+            B1 = np.dot(precisions[k], B0)
+            l = np.dot(B0.T, B1)
             assert shape(l) == (1, 1), "shape problem here"
-            Mu[n, k] = A + inv_wishart_dof[k] * l #shape: (n,k)
+            energy[i][k] = A + inv_wishart_dof[k] * l  #shape: (n,k)
     
-    return Mu
+    return energy
 
-def Piopt(alpha0,N_k):
-    alphak = alpha0 + N_k
-    pik = digamma(alphak) - digamma(alphak.sum())
-    return pik
+def get_expected_log_pi(mixture_concentration : float, N_k : np.ndarray) -> np.ndarray:
+    mixture_concentration += N_k
+    expected_log_pi = digamma(mixture_concentration) - digamma(mixture_concentration.sum())
+    return expected_log_pi
 
-def Invcopt(W,inv_wishart_dof,obs_dim,K):
-    invc = [None for _ in range(K)]
-    for k in range(K):
-        dW = det(W[k])
-        # print(f"dw: {dW}")
-        if dW>1e-30: ld = log(dW)
-        else: ld = 0.0
-        invc[k] = sum([digamma((inv_wishart_dof[k]+1-i) / 2.) for i in range(obs_dim)]) + obs_dim*log(2) + ld
-    return invc
+def get_log_det_precisions(precisions : list, inv_wishart_dof : int, obs_dim : int, n_components : int) -> list:
+    log_det_precisions = [None for _ in range(n_components)]
+    for k in range(n_components):
+        det_precision = np.linalg.det(precisions[k])
+        if det_precision > 1e-30: 
+            log_det = np.log(det_precision)
+        else: 
+            log_det = 0.0
+        log_det_precisions[k] = np.sum([digamma((inv_wishart_dof[k] + 1 - i) / 2.) for i in range(obs_dim)]) + obs_dim * np.log(2) + log_det
+    return log_det_precisions
         
-def Zopt(obs_dim, exp_ln_pi, exp_ln_gam, exp_ln_mu, N, K):
-    Z = zeros((N,K)) #ln Z
-    for k in range(K):
-        Z[:,k] = exp_ln_pi[k] + 0.5*exp_ln_gam[k] - 0.5*obs_dim*log(2*pi) - 0.5*exp_ln_mu[:,k]
+def update_variational_params(obs_dim : int, expected_log_pi : np.ndarray, log_det_precisions : list, energy : np.ndarray, n_obs : int, n_components : int) -> np.ndarray:
+    ln_q_z = zeros((n_obs, n_components))  # ln q_z 
+    for k in range(n_components):
+        ln_q_z[:, k] = expected_log_pi[k] + 0.5 * log_det_precisions[k] - 0.5 * obs_dim * np.log(2 * pi) - 0.5 * energy[:, k]
+
     #normalise ln Z:
-    Z -= reshape(Z.max(axis=1),(N,1))
-    Z1 = exp(Z) / reshape(exp(Z).sum(axis=1), (N,1))
-    return Z1
+    ln_q_z -= ln_q_z.max(axis=1).reshape(n_obs, 1)
+    q_z = np.exp(ln_q_z) / np.exp(ln_q_z).sum(axis=1).reshape(n_obs, 1)
+    return q_z
     
 if __name__ == "__main__":
+    # setup results dirs
     shutil.rmtree(RESULTS_DIR, ignore_errors=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    #generate synthetic data:
+    #generate synthetic data
     inputs, z = simulate() 
 
     # modelling hyperpriors 
@@ -224,10 +226,5 @@ if __name__ == "__main__":
         }
 
     # run experiment 
-    mu, invc, pik, q_z = run(inputs, n_components, hyperpriors)
-
-    plt.figure() 
-    plt.scatter(inputs[:, 0], inputs[:, 1], c=z)
-    for m in mu: 
-        plt.scatter(m[0], m[1], c='b', marker='x')
-    plt.show()
+    means, log_det_precisions, expected_log_pi, q_z = run(inputs, n_components, hyperpriors)
+    
