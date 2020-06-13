@@ -6,204 +6,201 @@ Created on 14 May 2013
 #implementation of variational Gaussian mixture models
 
 from numpy import *
+import numpy as np 
 import numpy.random as npr
+import matplotlib.pyplot as plt
 from matplotlib.pyplot import *
 from numpy.linalg.linalg import inv, det
-from scipy.special.basic import digamma
+from scipy.special import digamma
 import time
+from tqdm import tqdm 
 from viz import create_cov_ellipse
 
-RESULTS_DIR = '/Users/nickrichardson/Desktop/personal/projects/picard/tests/comparators'
+import sys 
+import os 
+import shutil
 
-def gen(K : int, N : int, obs_dim):
+# ENV 
+RESULTS_DIR = '/Users/nickrichardson/Desktop/personal/projects/picard/tests/comparators/gmm_animations'
+npr.seed(2305)
+
+def simulate(n_components : int = 30, n_obs : int = 200, obs_dim : int = 2) -> np.ndarray:
     """
     Generate samples from a mixture of Gaussians. 
 
     Parameters
     ----------- 
-    K : int 
-        number of component distributions 
-    N : int 
-        number of data to sample from the model 
+    n_components : int 
+        number of component distributions (default 30)
+    n_obs : int 
+        number of obserations to sample from the model (default 200)
+    obs_dim : int 
+        observation dimension (default 2)
     """ 
-    
-    mu = array([random.multivariate_normal(zeros(obs_dim),10*eye(obs_dim)) for _ in range(K)])
-    cov = [0.1*eye(obs_dim) for _ in range(K)]
-    q = random.dirichlet(ones(K)) #component coefficients
-    inputs = zeros((N,obs_dim)) #observations
-    Z = zeros((N,K)) #latent variables
-    for n in range(N):
-        #decide which component has responsibility for this data point:
-        Z[n,:] = random.multinomial(1, q)
-        k = Z[n,:].argmax()
-        inputs[n,:] =  random.multivariate_normal(mu[k,:],cov[k])
-    return inputs
+    mu = np.array([npr.multivariate_normal(np.zeros(obs_dim), 10 * np.eye(obs_dim)) for _ in range(n_components)])
+    cov = [0.1 * np.eye(obs_dim) for _ in range(n_components)]
+    pi = npr.dirichlet(np.ones(n_components))              # mixture distribution -- pi ~ Dir(1/k)
+    inputs = np.zeros((n_obs, obs_dim))                    # observation model -- x_i | z_i ~ Normal(mu_i, cov_i)
+    z = np.zeros((n_obs, n_components))                    # latent assignments -- z_i | pi ~ Categorical(pi)
+    for i in range(n_obs):
+        z[i] = npr.multinomial(1, pi)
+        k = np.argmax(z[i])
+        inputs[i] =  npr.multivariate_normal(mu[k], cov[k])
+    return inputs, np.argmax(z, axis=1)
 
-
-def run(inputs : np.ndarray, K : int, VERBOSE : bool = True):
+def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : bool = True, save_every : int = 5):
     """
     Experiment wrapper. 
 
     Parameters
     ----------
     inputs : np.ndarray
-        input samples 
-    K : int 
-        K
-    VERBOSE :
-        VERBOSE
+        observations
+    n_components : int 
+        number of mixture components 
+    verbose : bool
+        verbosity (default True)
     """
     # observations 
-    (N, obs_dim) = inputs.shape 
-    
-    # hyperparameters :
-    alpha0 = 0.1 #prior coefficient count (for Dir)
-    beta0 = (1e-20)*1. #variance of mean (smaller: broader the means)
-    v0 = obs_dim+1. #2. #degrees of freedom in inverse wishart
-    m0 = zeros(obs_dim) #prior mean
-    W0 = (1e0)*eye(obs_dim) #prior cov (bigger: smaller covariance)
+    (n_obs, obs_dim) = inputs.shape 
     
     #params:
-    #Z = ones((N,K))/float(K) #uniform initial assignment
-    Z = array([random.dirichlet(ones(K)) for _ in range(N)])
+    q_z = np.array([npr.dirichlet(np.ones(n_components)) for _ in range(n_obs)])
 
-    ion()    
-    fig = figure(figsize=(10,10))
+    plt.ion()    
+    fig = plt.figure(figsize=(10,10))
     ax_spatial = fig.add_subplot(1,1,1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
     circs = []
                 
     
     itr, max_itr = 0, 200
-    while itr < max_itr:
-        #M-like-step
-        NK = Z.sum(axis=0)
-        vk = v0 + NK + 1.
-        xd = calcinputsd(Z,X)
-        S = calcS(Z,inputs,xd,NK)
-        betak = beta0 + NK
-        m = calcM(K,obs_dim,beta0,m0,NK,xd,betak)
-        W = calcW(K,W0,xd,NK,m0,obs_dim,beta0,S)
+    for itr in tqdm(range(max_itr)):
+        # M step 
+        N_k = q_z.sum(axis=0)
+        inv_wishart_dof = hyperpriors['inv_wishart_dof'] + N_k + 1.
+        xd = calcinputsd(q_z, inputs)
+        S = calcS(q_z, inputs, xd, N_k)
+        beta_k = hyperpriors['beta_0']+ N_k
+        m = calcM(n_components, obs_dim, hyperpriors['beta_0'], hyperpriors['prior_mean'], N_k, xd, beta_k)
+        W = calcW(n_components, hyperpriors['prior_precision'], xd, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['beta_0'], S)
 
-        #E-like-step
-        mu = Muopt(inputs,obs_dim,NK,betak,m,W,xd,vk,N,K) #eqn 10.64 Bishop
-        invc = Invcopt(W,vk,obs_dim,K) #eqn 10.65 Bishop
-        pik = Piopt(alpha0,NK) #eqn 10.66 Bishop
-        Z = Zopt(obs_dim, pik, invc, mu, N, K) #eqn 10.46 Bishop
+        # E step 
+        mu = Muopt(inputs, obs_dim, N_k, beta_k, m, W, xd, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
+        invc = Invcopt(W, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
+        pik = Piopt(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
+        q_z = Zopt(obs_dim, pik, invc, mu, n_obs, n_components) #eqn 10.46 Bishop
         
-        if VERBOSE:
-            print(f"Ieration: {iter}")
-            print(f"Means: {m}")
-            print(f"Inverse 'c': {invc}")
-            print(f"Exp(pi_k): {exp(pik}")
-            print(f"N_k: {NK}")
+        if (verbose is True) and (itr % save_every == 0):
             if itr == 0:
-                sctinputs = scatter(X[:,0], X[:,1])
-                sctZ = scatter(m[:,0],m[:,1], color='r')
+                sctinputs = plt.scatter(inputs[:,0], inputs[:,1])
+                sctZ = plt.scatter(m[:,0], m[:,1], color='r')
             else:
                 #ellipses to show covariance of components
                 for circ in circs: circ.remove()
                 circs = []
-                for k in range(K):
-                    circ = create_cov_ellipse(S[k], m[k,:],color='r',alpha=0.3) #calculate params of ellipses (adapted from http://stackoverflow.com/questions/12301071/multidimensional-confidence-intervals)
+                for k in range(n_components):
+                    circ = create_cov_ellipse(S[k], m[k,:], color='r', alpha=0.3) #calculate params of ellipses (adapted from http://stackoverflow.com/questions/12301071/multidimensional-confidence-intervals)
                     circs.append(circ)
                     #add to axes:
                     ax_spatial.add_artist(circ)
-                    #make sure components with NK=0 are not visible:
-                    if NK[k]<=alpha0: m[k,:] = m[NK.argmax(),:] #put over point that obviously does have assignments
+                    #make sure components with N_k=0 are not visible:
+                    if N_k[k]<= hyperpriors['mixture_concentration']: m[k,:] = m[N_k.argmax(),:] #put over point that obviously does have assignments
                 sctZ.set_offsets(m)
             draw()
             #time.sleep(0.1)
-            savefig(RESULTS_DIR + 'animation/%04d.png'%itr)
+            savefig(os.path.join(RESULTS_DIR, f"{itr}.png"))
         itr += 1
     
-    if VERBOSE:
+    if verbose is True:
+        pass
         #keep display:    
-        time.sleep(360)
+        # time.sleep(360)
     
-    return m,invc,pik,Z
+    return m, invc, pik, q_z
     
     
-def calcinputsd(Z,X):
+def calcinputsd(q_z, inputs):
     #weighted means (by component responsibilites)
-    (N,obs_dim) = shape(X)
-    (N1,K) = shape(Z)
-    NK = Z.sum(axis=0)
-    assert N==N1
-    xd = zeros((K,obs_dim))
-    for n in range(N):
-        for k in range(K):
-            xd[k,:] += Z[n,k]*inputs[n,:]
+    (n_obs, obs_dim) = shape(inputs)
+    (N1, n_components) = shape(q_z)
+    N_k = q_z.sum(axis=0)
+    assert n_obs == N1
+    xd = np.zeros((n_components,obs_dim))
+    for n in range(n_obs):
+        for k in range(n_components):
+            xd[k,:] += q_z[n, k] * inputs[n,:]
     #safe divide:
-    for k in range(K):
-        if NK[k]>0: xd[k,:] = xd[k,:]/NK[k]
+    for k in range(n_components):
+        if N_k[k] > 0: 
+            xd[k,:] = xd[k,:] / N_k[k]
     
     return xd
 
-def calcS(Z,inputs,xd,NK):
-    (N,K)=shape(Z)
-    (N1,obs_dim)=shape(X)
-    assert N==N1
+def calcS(q_z, inputs, xd, N_k):
+    (n_obs, n_components)= shape(q_z)
+    (N1, obs_dim)=shape(inputs)
+    assert n_obs == N1
     
-    S = [zeros((obs_dim,obs_dim)) for _ in range(K)]
-    for n in range(N):
-        for k in range(K):
-            B0 = reshape(inputs[n,:]-xd[k,:], (obs_dim,1))
-            L = dot(B0,B0.T)
-            assert shape(L)==shape(S[k]),shape(L)
-            S[k] += Z[n,k]*L
+    S = [zeros((obs_dim, obs_dim)) for _ in range(n_components)]
+    for n in range(n_obs):
+        for k in range(n_components):
+            B0 = reshape(inputs[n]-xd[k], (obs_dim, 1))
+            L = dot(B0, B0.T)
+            assert shape(L) == shape(S[k]), shape(L)
+            S[k] += q_z[n, k] * L
     #safe divide:
-    for k in range(K):
-        if NK[k]>0: S[k] = S[k]/NK[k]
+    for k in range(n_components):
+        if N_k[k] > 0: 
+            S[k] = S[k] / N_k[k]
     return S
 
-def calcW(K,W0,xd,NK,m0,obs_dim,beta0,S):
-    Winv = [None for _ in range(K)]
-    for k in range(K): 
-        Winv[k]  = inv(W0) + NK[k]*S[k]
-        Q0 = reshape(xd[k,:] - m0, (obs_dim,1))
-        q = dot(Q0,Q0.T)
-        Winv[k] += (beta0*NK[k] / (beta0 + NK[k]) ) * q
-        assert shape(q)==(obs_dim,obs_dim)
+def calcW(n_components, prior_precision, xd, N_k, prior_mean, obs_dim, beta_0, S):
+    Winv = [None for _ in range(n_components)]
+    for k in range(n_components): 
+        Winv[k]  = inv(prior_precision) + N_k[k] * S[k]
+        Q0 = reshape(xd[k,:] - prior_mean, (obs_dim, 1))
+        q = dot(Q0, Q0.T)
+        Winv[k] += (beta_0 * N_k[k] / (beta_0 + N_k[k]) ) * q
+        assert shape(q)==(obs_dim, obs_dim)
     W = []
-    for k in range(K):
+    for k in range(n_components):
         try:
             W.append(inv(Winv[k]))
         except linalg.linalg.LinAlgError:
-            print 'Winv[%i]'%k, Winv[k]
             raise linalg.linalg.LinAlgError()
     return W
 
-def calcM(K,obs_dim,beta0,m0,NK,xd,betak):
-    m = zeros((K,obs_dim))
-    for k in range(K): m[k,:] = (beta0*m0 + NK[k]*xd[k,:]) / betak[k]
+def calcM(n_components, obs_dim, beta_0, prior_mean, N_k, xd, beta_k):
+    m = zeros((n_components, obs_dim))
+    for k in range(n_components): m[k,:] = (beta_0 * prior_mean + N_k[k] * xd[k,:]) / beta_k[k]
     return m    
 
-def Muopt(inputs,obs_dim,NK,betak,m,W,xd,vk,N,K):
-    Mu = zeros((N,K))
-    for n in range(N):
-        for k in range(K):
-            A = obs_dim / betak[k] #shape: (k,)
-            B0 = reshape((inputs[n,:] - m[k,:]),(obs_dim,1))
+def Muopt(inputs, obs_dim, N_k, beta_k, m, W, xd, inv_wishart_dof, n_obs, n_components):
+    Mu = zeros((n_obs, n_components))
+    for n in range(n_obs):
+        for k in range(n_components):
+            A = obs_dim / beta_k[k] #shape: (k,)
+            B0 = reshape((inputs[n] - m[k]),(obs_dim, 1))
             B1 = dot(W[k], B0)
             l = dot(B0.T, B1)
-            assert shape(l)==(1,1),shape(l)
-            Mu[n,k] = A + vk[k]*l #shape: (n,k)
+            assert shape(l) == (1, 1), "shape problem here"
+            Mu[n, k] = A + inv_wishart_dof[k] * l #shape: (n,k)
     
     return Mu
 
-def Piopt(alpha0,NK):
-    alphak = alpha0 + NK
+def Piopt(alpha0,N_k):
+    alphak = alpha0 + N_k
     pik = digamma(alphak) - digamma(alphak.sum())
     return pik
 
-def Invcopt(W,vk,obs_dim,K):
+def Invcopt(W,inv_wishart_dof,obs_dim,K):
     invc = [None for _ in range(K)]
     for k in range(K):
         dW = det(W[k])
-        print 'dW',dW
+        # print(f"dw: {dW}")
         if dW>1e-30: ld = log(dW)
         else: ld = 0.0
-        invc[k] = sum([digamma((vk[k]+1-i) / 2.) for i in range(obs_dim)]) + obs_dim*log(2) + ld
+        invc[k] = sum([digamma((inv_wishart_dof[k]+1-i) / 2.) for i in range(obs_dim)]) + obs_dim*log(2) + ld
     return invc
         
 def Zopt(obs_dim, exp_ln_pi, exp_ln_gam, exp_ln_mu, N, K):
@@ -216,11 +213,28 @@ def Zopt(obs_dim, exp_ln_pi, exp_ln_gam, exp_ln_mu, N, K):
     return Z1
     
 if __name__ == "__main__":
+    shutil.rmtree(RESULTS_DIR, ignore_errors=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
     #generate synthetic data:
-    inputs = gen(30,200,2)
-    
-    #run VB on the data:
-    K1 = 20 # num components in inference
-    mu,invc,pik,Z = run(inputs,K1)
-    print 'mu',mu
-    print 'NK',Z.sum(axis=0)
+    inputs, z = simulate() 
+
+    # modelling hyperpriors 
+    n_components = 20 
+    obs_dim = 2 
+    hyperpriors = {
+        'mixture_concentration': 0.1,                     
+        'beta_0': (1e-20),  
+        'inv_wishart_dof': obs_dim + 1., 
+        'prior_mean': np.zeros(obs_dim), 
+        'prior_precision': np.eye(obs_dim)
+        }
+
+    # run experiment 
+    mu, invc, pik, q_z = run(inputs, n_components, hyperpriors)
+
+    plt.figure() 
+    plt.scatter(inputs[:, 0], inputs[:, 1], c=z)
+    for m in mu: 
+        plt.scatter(m[0], m[1], c='b', marker='x')
+    plt.show()
