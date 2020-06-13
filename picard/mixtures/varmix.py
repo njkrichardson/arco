@@ -1,18 +1,14 @@
 '''
 Created on 14 May 2013
 @author: James McInerney
+
+Edited on 13 June 2020 
+@author: njkr 
 '''
-
-#implementation of variational Gaussian mixture models
-
-from numpy import *
 import numpy as np 
 import numpy.random as npr
 import matplotlib.pyplot as plt
-from matplotlib.pyplot import *
-from numpy.linalg.linalg import inv, det
 from scipy.special import digamma
-import time
 from tqdm import tqdm 
 from viz import create_cov_ellipse
 
@@ -66,6 +62,13 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     
     # initialize variational parameters
     q_z = np.array([npr.dirichlet(np.ones(n_components)) for _ in range(n_obs)])
+
+    # initialize plot (if relevant)
+    if verbose is True: 
+        plt.ion()    
+        fig = plt.figure(figsize=(10, 10))
+        ax_spatial = fig.add_subplot(1, 1, 1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
+        circs = []
                 
     for i in tqdm(range(max_iterations), disable=(not verbose)):
         # M step: update the "global" parameters 
@@ -84,10 +87,6 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
         q_z = update_variational_params(obs_dim, expected_log_pi, log_det_precision, energy, n_obs, n_components) #eqn 10.46 Bishop (really 10.46 taken through 10.49)
         
         if verbose is True: 
-            plt.ion()    
-            fig = plt.figure(figsize=(10, 10))
-            ax_spatial = fig.add_subplot(1, 1, 1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
-            circs = []
             if i == 0:
                 plt.scatter(inputs[:, 0], inputs[:, 1])
                 sctZ = plt.scatter(means[:, 0], means[:, 1], color='r')
@@ -103,9 +102,8 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
                     #make sure components with N_k=0 are not visible:
                     if N_k[k]<= hyperpriors['mixture_concentration']: means[k] = means[N_k.argmax(),:] #put over point that obviously does have assignments
                 sctZ.set_offsets(means)
-            draw()
-            #time.sleep(0.1)
-            savefig(os.path.join(RESULTS_DIR, f"{i}.png"))
+                plt.draw()
+                plt.savefig(os.path.join(RESULTS_DIR, f"{i}.png"))
     
     if verbose is True:
         pass
@@ -175,7 +173,6 @@ def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, beta_k : fl
             B0 = (inputs[i] - means[k]).reshape(obs_dim, 1)
             B1 = np.dot(precisions[k], B0)
             l = np.dot(B0.T, B1)
-            assert shape(l) == (1, 1), "shape problem here"
             energy[i][k] = A + inv_wishart_dof[k] * l  #shape: (n,k)
     
     return energy
@@ -197,9 +194,9 @@ def get_log_det_precisions(precisions : list, inv_wishart_dof : int, obs_dim : i
     return log_det_precisions
         
 def update_variational_params(obs_dim : int, expected_log_pi : np.ndarray, log_det_precisions : list, energy : np.ndarray, n_obs : int, n_components : int) -> np.ndarray:
-    ln_q_z = zeros((n_obs, n_components))  # ln q_z 
+    ln_q_z = np.zeros((n_obs, n_components))  # ln q_z 
     for k in range(n_components):
-        ln_q_z[:, k] = expected_log_pi[k] + 0.5 * log_det_precisions[k] - 0.5 * obs_dim * np.log(2 * pi) - 0.5 * energy[:, k]
+        ln_q_z[:, k] = expected_log_pi[k] + 0.5 * log_det_precisions[k] - 0.5 * obs_dim * np.log(2 * np.pi) - 0.5 * energy[:, k]
 
     #normalise ln Z:
     ln_q_z -= ln_q_z.max(axis=1).reshape(n_obs, 1)
