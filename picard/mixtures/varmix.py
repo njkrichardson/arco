@@ -48,7 +48,7 @@ def simulate(n_components : int = 30, n_obs : int = 200, obs_dim : int = 2) -> n
         inputs[i] =  npr.multivariate_normal(mu[k], cov[k])
     return inputs, np.argmax(z, axis=1)
 
-def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : bool = True, save_every : int = 5):
+def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : bool = True, save_every : int = 5 , max_iterations : int = 200):
     """
     Experiment wrapper. 
 
@@ -64,116 +64,109 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     # observations 
     (n_obs, obs_dim) = inputs.shape 
     
-    #params:
+    # initialize latent assignments distributions 
     q_z = np.array([npr.dirichlet(np.ones(n_components)) for _ in range(n_obs)])
 
     plt.ion()    
-    fig = plt.figure(figsize=(10,10))
-    ax_spatial = fig.add_subplot(1,1,1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
+    fig = plt.figure(figsize=(10, 10))
+    ax_spatial = fig.add_subplot(1, 1, 1) #http://stackoverflow.com/questions/3584805/in-matplotlib-what-does-111-means-in-fig-add-subplot111
     circs = []
                 
-    
-    itr, max_itr = 0, 200
-    for itr in tqdm(range(max_itr)):
-        # M step 
+    for i in tqdm(range(max_iterations), disable=(not verbose)):
+        # M step: update the "global" parameters 
         N_k = q_z.sum(axis=0)
+        beta_k = hyperpriors['beta_0'] + N_k
         inv_wishart_dof = hyperpriors['inv_wishart_dof'] + N_k + 1.
-        xd = calcinputsd(q_z, inputs)
-        S = calcS(q_z, inputs, xd, N_k)
-        beta_k = hyperpriors['beta_0']+ N_k
-        m = calcM(n_components, obs_dim, hyperpriors['beta_0'], hyperpriors['prior_mean'], N_k, xd, beta_k)
-        W = calcW(n_components, hyperpriors['prior_precision'], xd, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['beta_0'], S)
+        weighted_means = get_weighted_means(q_z, inputs, N_k)
+        covs = update_covs(q_z, inputs, weighted_means, N_k)
+        means = update_means(n_components, obs_dim, hyperpriors['beta_0'], hyperpriors['prior_mean'], N_k, weighted_means, beta_k)
+        precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['beta_0'], covs)
 
-        # E step 
-        mu = Muopt(inputs, obs_dim, N_k, beta_k, m, W, xd, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
-        invc = Invcopt(W, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
+        # E step: update the "local" variational distribution parameters
+        mu = Muopt(inputs, obs_dim, N_k, beta_k, means, precisions, weighted_means, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
+        invc = Invcopt(precisions, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
         pik = Piopt(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
         q_z = Zopt(obs_dim, pik, invc, mu, n_obs, n_components) #eqn 10.46 Bishop
         
-        if (verbose is True) and (itr % save_every == 0):
-            if itr == 0:
-                sctinputs = plt.scatter(inputs[:,0], inputs[:,1])
-                sctZ = plt.scatter(m[:,0], m[:,1], color='r')
+        if (verbose is True) and (i % save_every == 0):
+            if i == 0:
+                # sctinputs = plt.scatter(inputs[:,0], inputs[:,1])
+                plt.scatter(inputs[:, 0], inputs[:, 1])
+                sctZ = plt.scatter(means[:, 0], means[:, 1], color='r')
             else:
                 #ellipses to show covariance of components
                 for circ in circs: circ.remove()
                 circs = []
                 for k in range(n_components):
-                    circ = create_cov_ellipse(S[k], m[k,:], color='r', alpha=0.3) #calculate params of ellipses (adapted from http://stackoverflow.com/questions/12301071/multidimensional-confidence-intervals)
+                    circ = create_cov_ellipse(covs[k], means[k], color='r', alpha=0.3) #calculate params of ellipses (adapted from http://stackoverflow.com/questions/12301071/multidimensional-confidence-intervals)
                     circs.append(circ)
                     #add to axes:
                     ax_spatial.add_artist(circ)
                     #make sure components with N_k=0 are not visible:
-                    if N_k[k]<= hyperpriors['mixture_concentration']: m[k,:] = m[N_k.argmax(),:] #put over point that obviously does have assignments
-                sctZ.set_offsets(m)
+                    if N_k[k]<= hyperpriors['mixture_concentration']: means[k] = means[N_k.argmax(),:] #put over point that obviously does have assignments
+                sctZ.set_offsets(means)
             draw()
             #time.sleep(0.1)
-            savefig(os.path.join(RESULTS_DIR, f"{itr}.png"))
-        itr += 1
+            savefig(os.path.join(RESULTS_DIR, f"{i}.png"))
     
     if verbose is True:
         pass
-        #keep display:    
-        # time.sleep(360)
     
     return m, invc, pik, q_z
     
     
-def calcinputsd(q_z, inputs):
-    #weighted means (by component responsibilites)
-    (n_obs, obs_dim) = shape(inputs)
-    (N1, n_components) = shape(q_z)
-    N_k = q_z.sum(axis=0)
-    assert n_obs == N1
-    xd = np.zeros((n_components,obs_dim))
-    for n in range(n_obs):
+def get_weighted_means(q_z : np.ndarray, inputs : np.ndarray, N_k : np.ndarray) -> np.ndarray:
+    (n_obs, obs_dim) = inputs.shape 
+    (_, n_components) = q_z.shape
+    weighted_means = np.zeros((n_components, obs_dim))
+    
+    for i in range(n_obs):
         for k in range(n_components):
-            xd[k,:] += q_z[n, k] * inputs[n,:]
-    #safe divide:
+            weighted_means[k] += q_z[i][k] * inputs[i]
+    
     for k in range(n_components):
         if N_k[k] > 0: 
-            xd[k,:] = xd[k,:] / N_k[k]
-    
-    return xd
+            weighted_means[k] /= N_k[k]
 
-def calcS(q_z, inputs, xd, N_k):
-    (n_obs, n_components)= shape(q_z)
-    (N1, obs_dim)=shape(inputs)
-    assert n_obs == N1
+    return weighted_means
+
+def update_covs(q_z : np.ndarray, inputs : np.ndarray, weighted_means : np.ndarray, N_k : np.ndarray) -> list:
+    (n_obs, n_components) = q_z.shape
+    (_, obs_dim) = inputs.shape
     
-    S = [zeros((obs_dim, obs_dim)) for _ in range(n_components)]
-    for n in range(n_obs):
+    covs = [np.zeros((obs_dim, obs_dim)) for _ in range(n_components)]
+    for i in range(n_obs):
         for k in range(n_components):
-            B0 = reshape(inputs[n]-xd[k], (obs_dim, 1))
-            L = dot(B0, B0.T)
-            assert shape(L) == shape(S[k]), shape(L)
-            S[k] += q_z[n, k] * L
-    #safe divide:
+            B0 = (inputs[i] - weighted_means[k]).reshape(obs_dim, 1)
+            L = np.dot(B0, B0.T)
+            covs[k] += q_z[i, k] * L
+
     for k in range(n_components):
         if N_k[k] > 0: 
-            S[k] = S[k] / N_k[k]
-    return S
+            covs[k] /= N_k[k]
+    return covs
 
-def calcW(n_components, prior_precision, xd, N_k, prior_mean, obs_dim, beta_0, S):
+def update_precisions(n_components : int, prior_precision : float, weighted_means : np.ndarray, N_k : np.ndarray, prior_mean : np.ndarray, obs_dim : int, beta_0 : float, covs : list) -> list:
     Winv = [None for _ in range(n_components)]
     for k in range(n_components): 
-        Winv[k]  = inv(prior_precision) + N_k[k] * S[k]
-        Q0 = reshape(xd[k,:] - prior_mean, (obs_dim, 1))
-        q = dot(Q0, Q0.T)
+        Winv[k]  = np.linalg.inv(prior_precision) + N_k[k] * covs[k]
+        Q0 = (weighted_means[k,:] - prior_mean).reshape(obs_dim, 1)
+        q = np.dot(Q0, Q0.T)
         Winv[k] += (beta_0 * N_k[k] / (beta_0 + N_k[k]) ) * q
-        assert shape(q)==(obs_dim, obs_dim)
+
     W = []
     for k in range(n_components):
         try:
-            W.append(inv(Winv[k]))
+            W.append(np.linalg.inv(Winv[k]))
         except linalg.linalg.LinAlgError:
             raise linalg.linalg.LinAlgError()
     return W
 
-def calcM(n_components, obs_dim, beta_0, prior_mean, N_k, xd, beta_k):
-    m = zeros((n_components, obs_dim))
-    for k in range(n_components): m[k,:] = (beta_0 * prior_mean + N_k[k] * xd[k,:]) / beta_k[k]
-    return m    
+def update_means(n_components : int, obs_dim : int, beta_0 : float, prior_mean : np.ndarray, N_k : np.ndarray, weighted_means : np.ndarray, beta_k : float) -> np.ndarray:
+    means = np.zeros((n_components, obs_dim))
+    for k in range(n_components): 
+        means[k] = (beta_0 * prior_mean + N_k[k] * weighted_means[k]) / beta_k[k]
+    return means 
 
 def Muopt(inputs, obs_dim, N_k, beta_k, m, W, xd, inv_wishart_dof, n_obs, n_components):
     Mu = zeros((n_obs, n_components))
