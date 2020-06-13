@@ -41,14 +41,17 @@ class GaussianMixtureModel(Model):
     def sample(self): 
         pass 
 
-    def fit(self, method : str = 'mean_field_vb'):
+    def fit(self, obs : np.ndarray, method : str = 'mean_field_vb'):
         q_z = np.array([Categorical(self.prior['mixture_prior'].sample()) for _ in range(self.n_components)])
 
         if method is 'mean_field_vb': 
-            # M step 
+            # M step (TODO: remember to normalize by n_k)
+            # TODO: use multiple processes 
             n_k = q_z.sum(axis=0)
             for k in range(self.n_components): 
-                self.likelihood['components'][k].vb_update(**params) 
+                self.prior['component_priors'][k].absorb(n_k[k])
+                self.likelihood['components'][k].vb_update(self.prior['component_priors'][k], obs, q_z) 
+
         else: 
             raise NotImplementedError
 
