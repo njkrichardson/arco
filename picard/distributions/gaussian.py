@@ -9,7 +9,7 @@ class UnivariateGaussian(Distribution):
     def __init__(self, params : dict = None): 
         self.params = params
     
-    def sample(self, size :int): 
+    def sample(self, size : int = 1): 
         pass 
 
     def density(self, obs : np.ndarray): 
@@ -49,7 +49,7 @@ class MultivariateGaussian(Distribution):
         self.precision_ = precision
         self.covariance_ = np.linalg.inv(precision)
 
-    def sample(self, size : int): 
+    def sample(self, size : int = 1): 
         return npr.multivariate_normal(self.mean, self.covariance, size=size)
 
     def density(self, obs : np.ndarray): 
@@ -62,6 +62,28 @@ class MultivariateGaussian(Distribution):
     def entropy(self): 
         return 0.5 * np.log(np.linalg.det(2 * np.pi * math.e * self.covariance_))
 
-if __name__ == "__main__":
-    gaussian = UnivariateGaussian() 
+    def vb_update(self, hyperpriors : dict, obs : np.ndarray, variational_params : np.ndarray, n_k : np.ndarray): 
+        pass
+
+class MatrixNormalInverseWishart(Distribution): 
+
+    def __init__(self, params : dict): 
+        pass 
+
+    def sample(self, size : int = 1): 
+        pass 
+
+    def density(self, obs : np.ndarray): 
+        pass
+
+class Wishart(Distribution): 
+
+    def __init__(self, params : dict): 
+        pass 
+
+    def sample(self, size : int = 1): 
+        pass 
+
+    def density(self, obs : np.ndarray): 
+        pass
 

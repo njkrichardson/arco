@@ -11,7 +11,7 @@ class Distribution(ABC):
         pass
 
     @abstractmethod 
-    def sample(self, size : int): 
+    def sample(self, size : int = 1): 
         pass 
 
     @abstractmethod
