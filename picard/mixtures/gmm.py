@@ -6,6 +6,7 @@ from picard.distributions.categorical import Categorical, Dirichlet
 from picard.distributions.gaussian import MatrixNormalInverseWishart, MultivariateGaussian
 
 # TODO: Solve the century old inference problem, for now we do bespoke like everyone else 
+# TODO: set a model obs dim, don't infer it during fit 
 
 class GaussianMixtureModel(Model): 
 
@@ -21,7 +22,6 @@ class GaussianMixtureModel(Model):
             'mixture_weights': Categorical(self.prior['mixture_prior'].sample()), 
             'components': [MultivariateGaussian(self.prior['component_priors'].sample()) for _ in range(self.n_components)]
         }
-        pass 
 
     @property
     def hyperpriors(self): 
@@ -42,15 +42,24 @@ class GaussianMixtureModel(Model):
         pass 
 
     def fit(self, obs : np.ndarray, method : str = 'mean_field_vb'):
+        n_obs, obs_dim = obs.shape[1]
         q_z = np.array([Categorical(self.prior['mixture_prior'].sample()) for _ in range(self.n_components)])
 
         if method is 'mean_field_vb': 
             # M step (TODO: remember to normalize by n_k)
             # TODO: use multiple processes 
-            n_k = q_z.sum(axis=0)
+
+            # know this works, vectorize in a bit 
+            weighted_means = np.zeros((self.n_components, obs_dim))
+            for i in range(n_obs): 
+                for k in range(self.n_components): 
+                    weighted_means[k] += q_z[i][k] * obs[i]
+            total_responsibilities = q_z.sum(axis=0)
+            scatter_matrices = [np.eye(obs_dim)] 
             for k in range(self.n_components): 
-                self.prior['component_priors'][k].absorb(n_k[k])
-                self.likelihood['components'][k].vb_update(self.prior['component_priors'][k], obs, q_z) 
+                self.prior['component_priors'][k].absorb(total_responsibilities[k])
+                # self.likelihood['components'][k].absorb(self.prior['component_priors'][k], obs, weights=q_z[:, k]) # maybe a sort of generic updates where the q_zs are just weights? 
+                self.likelihood['components'][k].absorb(self.prior['component_priors'][k], total_responsibilities[k] * (obs * q_z[:, k]))
 
         else: 
             raise NotImplementedError
@@ -58,3 +67,14 @@ class GaussianMixtureModel(Model):
     def predict(self): 
         pass
 
+if __name__ == "__main__":
+    # model parameters 
+    n_components = 3 
+    obs_dim = 2 
+
+    hyperpriors = dict(
+        mean=npr.randn(obs_dim),
+        scale=np.eye(obs_dim), 
+        prior_measurements=3, 
+        dof=obs_dim + 1
+        )
