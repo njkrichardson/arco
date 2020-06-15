@@ -104,87 +104,75 @@ class MultivariateGaussian(Distribution):
         """
         self.mean = (prior.prior_precision_scale * prior.mean + obs) / prior.precision_scale
 
-class MatrixNormalInverseWishart(Distribution): 
+class NormalInverseWishart(Distribution): 
 
     def __init__(self, params : dict): 
         self.mean = params['mean']
         self.dof = params['dof']
         self.prior_measurements = params['prior_measurements']
+        self.scale_matrix = params['scale_matrix']
         
-        if 'scale_matrix' in list(params.keys()): 
-            self.scale_matrix = params['scale_matrix']
-        elif 'inverse_precision_matrix' in list(params.keys()): 
-            self.inverse_scale_matrix = params['inverse_scale_matrix']
-        else: 
-            raise KeyError('Matrix normal inverse Wishart must be instantiated with either a scale matrix or inverse scale matrix')
-
     def __repr__(self): 
         return self.__class__.__name__ + f"(mean={self.mean}, dof={self.dof}, prior measurements={self.prior_measurements}, scale matrix={self.scale_matrix}"
 
-    @property 
-    def scale_matrix(self): 
-        return self.scale_matrix_
-    
-    @property 
-    def inverse_scale_matrix(self): 
-        return self.inverse_scale_matrix_ 
-
-    @scale_matrix.setter
-    def scale_matrix(self, scale_matrix : np.ndarray): 
-        self.scale_matrix_ = scale_matrix
-        self.inverse_scale_matrix_= np.linalg.inv(scale_matrix)
-
-    @inverse_scale_matrix.setter 
-    def inverse_scale_matrix(self, inverse_scale_matrix : np.ndarray): 
-        self.inverse_scale_matrix_ = inverse_scale_matrix
-        self.scale_matrix_ = np.linalg.inv(inverse_scale_matrix)
-
-    def sample(self, size : int = 1): 
-        # TODO: this is confusing, I'm not positive if I should sample sigma ~ InvWishart(scale, dof) or sigma ~ InvWishart(inv_scale, dof)
-        covariance = InverseWishart(dict(inverse_scale_matrix=self.inverse_scale_matrix, dof=self.dof)).sample() 
+    def sample(self, size : int = 1) -> tuple: 
+        covariance = InverseWishart(dict(scale_matrix=self.scale_matrix, dof=self.dof)).sample() 
         mean = MultivariateGaussian(dict(mean=self.mean, covariance=covariance/self.prior_measurements)).sample() 
         return (mean, covariance)
 
-    def density(self, obs : np.ndarray): 
-        pass
+    def density(self, obs : np.ndarray) -> float: 
+        normal_pdf = stats.multivariate_normal.pdf(obs, mean=self.mean, cov=self.scale_matrix)  
+        inv_wishart_pdf = stats.invwishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
+        return normal_pdf * inv_wishart_pdf
 
-    def absorb(self, count : float): 
-        self.precision_scale += count 
+    def absorb(self, obs : np.ndarray, count : float): 
+        # TODO: how is this going to work? 
+        self.prior_measurements += count 
         self.dof += count + 1
 
 class InverseWishart(Distribution): 
     """
-    Inverse Wishart distribution, most commonly used as a prior 
-    distribution over positive semidefinite matrices. 
+    Inverse Wishart distribution, a distribution over real-valued positive-definite matrices.
+    Used as the conjugate prior for the covariance matrix of a multivariate normal.  
 
     References: 
       * rb.gy/rrjtmo
     """
 
     def __init__(self, params : dict): 
-        self.inverse_scale_matrix = params['inverse_scale_matrix'] 
-        self.dim = self.inverse_scale_matrix.shape[0]
+        self.scale_matrix = params['scale_matrix'] 
+        self.dim = self.scale_matrix.shape[0]
         self.dof = params['dof']
 
-    def sample(self, size : int = 1): 
-        cholesky = np.linalg.cholesky(self.inverse_scale_matrix)
+    def sample(self, size : int = 1) -> np.ndarray: 
+        cholesky = np.linalg.cholesky(self.scale_matrix)
         x = np.diag(np.sqrt(np.atleast_1d(stats.chi2.rvs(self.dof - np.arange(self.dim)))))
         x[np.triu_indices_from(x, 1)] = npr.randn(self.dim * (self.dim - 1) // 2)
         r = np.linalg.qr(x, 'r')
         t = scipy.linalg.solve_triangular(r.T, cholesky.T, lower=True).T
-        return np.dot(t, t.T)
+        return t.dot(t.T)
 
-    def density(self, obs : np.ndarray): 
-        pass
+    def density(self, obs : np.ndarray) -> float: 
+        return stats.invwishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
 
 class Wishart(Distribution): 
+    """
+    Distribution over symmetric, nonnegative-definite matrices. Used as the conjugate prior 
+    of the precision matrix of a multivariate normal. 
+    """
 
     def __init__(self, params : dict): 
-        pass 
+        self.scale_matrix = params['scale_matrix']
+        self.dim = self.scale_matrix.shape[0]
+        self.dof = params['dof']
 
-    def sample(self, size : int = 1): 
-        pass 
+    def sample(self, size : int = 1) -> np.ndarray: 
+        cholesky = np.linalg.cholesky(self.scale_matrix)
+        a = np.diag(np.sqrt(npr.chisquare(self.dof - np.arange(self.dim))))
+        a[np.tri(self.dim, dtype=bool)] = npr.normal(size=(self.dim * (self.dim - 1) / 2.))
+        x = np.dot(cholesky, a)
+        return x.dot(x.T)
 
-    def density(self, obs : np.ndarray): 
-        pass
+    def density(self, obs : np.ndarray) -> float: 
+        return stats.wishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
 
