@@ -5,6 +5,7 @@ import scipy
 import scipy.stats as stats
 
 from picard.distributions.base import Distribution
+from picard.distributions.wishart import InverseWishart
 
 # TODO: should be more efficient way of maintaining the cov/precision isomorphism 
 
@@ -93,7 +94,7 @@ class MultivariateGaussian(Distribution):
         return normalizer * np.exp(-self.energy(obs))
 
     def energy(self, obs : np.ndarray): 
-        return 0.5 * (obs - self.mean).T.dot(self.precision_.dot(obs - self.mean))
+        return 0.5 * (obs - self.mean).T.dot(self.precision.dot(obs - self.mean))
 
     def entropy(self): 
         return 0.5 * np.log(np.linalg.det(2 * np.pi * math.e * self.covariance_))
@@ -111,7 +112,7 @@ class NormalInverseWishart(Distribution):
         self.dof = params['dof']
         self.prior_measurements = params['prior_measurements']
         self.scale_matrix = params['scale_matrix']
-        
+
     def __repr__(self): 
         return self.__class__.__name__ + f"(mean={self.mean}, dof={self.dof}, prior measurements={self.prior_measurements}, scale matrix={self.scale_matrix}"
 
@@ -126,53 +127,4 @@ class NormalInverseWishart(Distribution):
         return normal_pdf * inv_wishart_pdf
 
     def absorb(self, obs : np.ndarray, count : float): 
-        # TODO: how is this going to work? 
-        self.prior_measurements += count 
-        self.dof += count + 1
-
-class InverseWishart(Distribution): 
-    """
-    Inverse Wishart distribution, a distribution over real-valued positive-definite matrices.
-    Used as the conjugate prior for the covariance matrix of a multivariate normal.  
-
-    References: 
-      * rb.gy/rrjtmo
-    """
-
-    def __init__(self, params : dict): 
-        self.scale_matrix = params['scale_matrix'] 
-        self.dim = self.scale_matrix.shape[0]
-        self.dof = params['dof']
-
-    def sample(self, size : int = 1) -> np.ndarray: 
-        cholesky = np.linalg.cholesky(self.scale_matrix)
-        x = np.diag(np.sqrt(np.atleast_1d(stats.chi2.rvs(self.dof - np.arange(self.dim)))))
-        x[np.triu_indices_from(x, 1)] = npr.randn(self.dim * (self.dim - 1) // 2)
-        r = np.linalg.qr(x, 'r')
-        t = scipy.linalg.solve_triangular(r.T, cholesky.T, lower=True).T
-        return t.dot(t.T)
-
-    def density(self, obs : np.ndarray) -> float: 
-        return stats.invwishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
-
-class Wishart(Distribution): 
-    """
-    Distribution over symmetric, nonnegative-definite matrices. Used as the conjugate prior 
-    of the precision matrix of a multivariate normal. 
-    """
-
-    def __init__(self, params : dict): 
-        self.scale_matrix = params['scale_matrix']
-        self.dim = self.scale_matrix.shape[0]
-        self.dof = params['dof']
-
-    def sample(self, size : int = 1) -> np.ndarray: 
-        cholesky = np.linalg.cholesky(self.scale_matrix)
-        a = np.diag(np.sqrt(npr.chisquare(self.dof - np.arange(self.dim))))
-        a[np.tri(self.dim, dtype=bool)] = npr.normal(size=(self.dim * (self.dim - 1) / 2.))
-        x = np.dot(cholesky, a)
-        return x.dot(x.T)
-
-    def density(self, obs : np.ndarray) -> float: 
-        return stats.wishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
-
+        # TODO: how is this going to work? I think actually we should delegate the updates to the constituent distributions
