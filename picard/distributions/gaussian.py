@@ -148,6 +148,7 @@ class NormalInverseWishart(Distribution):
 
     def absorb(self, likelihood : Distribution, obs : np.ndarray, sufficient_stats : dict): 
         # TODO: Dangerous, be careful about using the properties like this, remember to test this later 
+        # TODO: lmao at this ordering, definitely will need to be tested 
         assert all(stat in list(sufficient_stats.keys()) for stat in ['scatter_matrix', 'n_measurements', 'dof', 'mean']), 'insufficient stats provided'
         self.posterior_scale_matrix =  self.scale_matrix + sufficient_stats['scatter_matrix'] + \
                                         ((self.measurements * sufficient_stats['n_measurements']) / (self.measurements + sufficient_stats['n_measurements'])) * \
