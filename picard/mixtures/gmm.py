@@ -3,6 +3,7 @@ import numpy as np
 import numpy.random as npr 
 
 from picard.models.base import Model
+from picard.distributions.base import MixtureDistribution
 from picard.distributions.categorical import Categorical, Dirichlet 
 from picard.distributions.gaussian import NormalInverseWishart, MultivariateGaussian
 from picard.utils.linear_algebra import safe_divide, tensor_outer_product
@@ -10,9 +11,12 @@ from picard.utils.linear_algebra import safe_divide, tensor_outer_product
 # TODO: Solve the century old inference problem, for now we do bespoke like everyone else 
 # TODO: set a model obs dim, don't infer it during fit 
 
+# TODO: convert to mixture model (from base)
+
 class GaussianMixtureModel(Model): 
 
     def __init__(self, n_components : int, hyperpriors : dict): 
+        # TODO: why do we need to keep around priors? 
         self.n_components = n_components
         self.hyperpriors_ = hyperpriors
         self.prior = {
@@ -58,7 +62,7 @@ class GaussianMixtureModel(Model):
         return np.array(x), np.array(z)
 
     def fit(self, obs : np.ndarray, method : str = 'mean_field_vb'):
-        n_obs, obs_dim = obs.shape
+        n_obs, _ = obs.shape
         q_z = np.array([self.prior['mixture_prior'].sample() for _ in range(n_obs)])
 
         if method is 'mean_field_vb': 
