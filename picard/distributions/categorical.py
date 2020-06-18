@@ -3,26 +3,30 @@ import numpy.random as npr
 
 from picard.distributions.base import Distribution
 
-# TODO: discrete versus continous distributions should extend a different abstract class 
-
 class Categorical(Distribution): 
 
     def __init__(self, params : dict = None): 
-        self.params = params
+        self.pis = params['pis']
+
+    def __repr__(self): 
+        return self.__class__.__name__ + f"(distribution={np.round(self.pis, 2)})"
     
-    def sample(self, size : int): 
-        pass 
+    def sample(self, size : int = 1): 
+        return npr.choice(np.arange(self.pis.size), size=size, p=self.pis) if size != 1 else npr.choice(np.arange(self.pis.size), size=size, p=self.pis)[0]
 
     def density(self, obs : np.ndarray): 
-        pass
+        raise NotImplementedError
 
 class Dirichlet(Distribution): 
 
     def __init__(self, params : dict = None): 
-        self.params = params
+        self.concentrations = params['concentrations']
+
+    def __repr__(self): 
+        return self.__class__.__name__ + f"(concentrations={self.concentrations})"
     
     def sample(self, size : int = 1): 
-        pass 
+        return npr.dirichlet(self.concentrations, size=size)[0] if size == 1 else npr.dirichlet(self.concentrations, size=size) 
 
     def density(self, obs : np.ndarray): 
-        pass
+        raise NotImplementedError

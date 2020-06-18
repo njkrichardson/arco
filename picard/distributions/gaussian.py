@@ -87,7 +87,8 @@ class MultivariateGaussian(Distribution):
         self.covariance_ = np.linalg.inv(precision)
 
     def sample(self, size : int = 1): 
-        return npr.multivariate_normal(self.mean, self.covariance, size=size)
+        # TODO: keep this DRY! 
+        return npr.multivariate_normal(self.mean, self.covariance, size=size) if size != 1 else npr.multivariate_normal(self.mean, self.covariance, size=size)[0]
 
     def density(self, obs : np.ndarray): 
         normalizer = 1 / np.sqrt(((2 * np.pi) ** self.dim) * np.linalg.det(self.covariance_)) 
@@ -146,10 +147,10 @@ class NormalInverseWishart(Distribution):
         inv_wishart_pdf = stats.invwishart.pdf(obs, df=self.dof, scale=self.scale_matrix)
         return normal_pdf * inv_wishart_pdf
 
-    def absorb(self, likelihood : Distribution, obs : np.ndarray, sufficient_stats : dict): 
+    def absorb(self, likelihood : Distribution, sufficient_stats : dict): 
         # TODO: Dangerous, be careful about using the properties like this, remember to test this later 
         # TODO: lmao at this ordering, definitely will need to be tested 
-        assert all(stat in list(sufficient_stats.keys()) for stat in ['scatter_matrix', 'n_measurements', 'dof', 'mean']), 'insufficient stats provided'
+        assert all(stat in list(sufficient_stats.keys()) for stat in ['scatter_matrix', 'n_measurements', 'mean']), 'insufficient stats provided'
         self.posterior_scale_matrix =  self.scale_matrix + sufficient_stats['scatter_matrix'] + \
                                         ((self.measurements * sufficient_stats['n_measurements']) / (self.measurements + sufficient_stats['n_measurements'])) * \
                                         np.outer((sufficient_stats['mean'] - self.mean), (sufficient_stats['mean'] - self.mean))
