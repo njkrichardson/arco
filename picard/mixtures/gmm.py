@@ -6,30 +6,26 @@ from picard.models.base import Model
 from picard.distributions.base import MixtureDistribution
 from picard.distributions.categorical import Categorical, Dirichlet 
 from picard.distributions.gaussian import NormalInverseWishart, MultivariateGaussian
-from picard.utils.linear_algebra import safe_divide, tensor_outer_product
+from picard.utils.linear_algebra import safe_divide, mahalanobis
 
 # TODO: Solve the century old inference problem, for now we do bespoke like everyone else 
 # TODO: set a model obs dim, don't infer it during fit 
 
 # TODO: convert to mixture model (from base)
+# TODO: initialize mvn from hyperprior if mu and sigma are not provided 
+
+# TODO: on initialization: if they give means and covariances in the prior just initialize with those, maybe unless otherwise stated we assume we're 
+# initializing by sampling from the prior? 
 
 class GaussianMixtureModel(Model): 
 
     def __init__(self, n_components : int, hyperpriors : dict): 
-        # TODO: why do we need to keep around priors? 
-        self.n_components = n_components
-        self.hyperpriors_ = hyperpriors
-        self.prior = {
-            'hyperpriors': self.hyperpriors_, 
-            'mixture_prior': Dirichlet(hyperpriors), 
-            'component_priors': [NormalInverseWishart(hyperpriors) for _ in range(self.n_components)]
-            }
-        init_likelihoods = [self.prior['component_priors'][k].sample() for k in range(self.n_components)]
-        init_params = [dict(mean=likelihood[0], covariance=likelihood[1]) for likelihood in init_likelihoods]
-        self.likelihood = {
-            'mixture_weights': Categorical(dict(pis=self.prior['mixture_prior'].sample())), 
-            'components': [MultivariateGaussian(init_params[k]) for k in range(self.n_components)]
-        }
+        self.n_components, self.hyperpriors_ = n_components, hyperpriors
+        self.prior = dict(
+            mixture_prior=Dirichlet(hyperpriors), 
+            component_priors=[NormalInverseWishart(hyperpriors) for _ in range(self.n_components)]
+        )
+        self.initialize_components() # right now, we can only initialize from the prior
 
     def __repr__(self): 
         return self.__class__.__name__ + f"(n_components={self.n_components})"
@@ -40,7 +36,7 @@ class GaussianMixtureModel(Model):
     
     @hyperpriors.setter
     def hyperpriors(self, hyperpriors : dict): 
-        # TODO: things geting sketchy here, need to think about how this should work
+        # TODO: things getting sketchy here, need to think about how this should work
         self.hyperpriors_ = hyperpriors
         self.prior['hyperpriors'] = self.hyperpriors_
         self.prior['mixture_prior'] = Dirichlet(self.hyperpriors_)
@@ -49,43 +45,67 @@ class GaussianMixtureModel(Model):
     def show(self): 
         pass 
 
-    def sample(self, n_samples : int):
-        assert n_samples > 1
+    def sample(self, size : int):
+        return self.likelihood.sample(size=size) 
 
-        z = [self.likelihood['mixture_weights'].sample()] 
-        x = [self.likelihood['components'][z[0]].sample()]
-
-        for _ in range(n_samples - 1): 
-            z.append(self.likelihood['mixture_weights'].sample())
-            x.append(self.likelihood['components'][z[-1]].sample())
-        
-        return np.array(x), np.array(z)
+    def initialize_components(self, method : str = 'from_prior', **kwargs): 
+        if method == 'from_prior': 
+            self.likelihood = MixtureDistribution(dict(
+                mixture_weights=self.prior['mixture_prior'].sample(), 
+                mixture_components=[self.prior['component_priors'][k].sample(return_dist=True) for k in range(self.n_components)]
+            ))
+        elif method == 'on_datum': 
+            raise NotImplementedError
+        elif method == 'kmeans++': 
+            raise NotImplementedError
+        elif method == 'gibbs': 
+            raise NotImplementedError
+        else: 
+            raise NotImplementedError
 
     def fit(self, obs : np.ndarray, method : str = 'mean_field_vb'):
+        # initialize variational params (TODO: alternative initializations?)
         n_obs, _ = obs.shape
         q_z = np.array([self.prior['mixture_prior'].sample() for _ in range(n_obs)])
 
         if method is 'mean_field_vb': 
-            # M step (TODO: remember to normalize by n_k)
+            # M step 
             # TODO: use multiple processes 
-
-            total_responsibilities = q_z.sum(axis=0).reshape(-1, 1)
-            normalizer = safe_divide(1, total_responsibilities) 
-            means = normalizer * obs.T.dot(q_z).T
-            # TODO: tensordot 
-            scatter_matrices = [] 
-            s = np.tile(obs, (self.n_components, 1, 1)) - np.array([np.tile(mean, (n_obs, 1)) for mean in means])
-            for scatter in s: 
-                scatter_matrices.append(scatter.T.dot(scatter))
-            sufficient_stats = [dict(
-                mean=means[k], 
-                scatter_matrix=scatter_matrices[k], 
-                n_measurements=total_responsibilities[k]) for k in range(self.n_components)]
+            sufficient_stats = self.collect_sufficient_stats(obs, q_z)
             for k in range(self.n_components): 
-                self.prior['component_priors'][k].absorb(self.likelihood['components'][k], sufficient_stats[k])
-
+                self.prior['component_priors'][k].absorb(self.likelihood.mixture_components[k], sufficient_stats[k])
+            
+            # E step 
+            expected_energy = self._compute_expected_energy(obs)
+            expected_log_det_precision = None 
+            
+        
         else: 
             raise NotImplementedError
+
+    def _compute_expected_energy(self, obs): 
+        n_obs, obs_dim = obs.shape
+        expected_energy = np.zeros((n_obs, self.n_components))
+        for i in range(n_obs): 
+            for k in range(self.n_components): 
+                expected_energy[i][k] = obs_dim * (1/self.prior.n_measurements) + self.prior.dof * mahalanobis(obs[i], self.components[k].mean, self.components[k].covariance)
+
+        return expected_energy
+
+    def collect_sufficient_stats(self, obs : np.ndarray, assignments : np.ndarray): 
+        n_obs, obs_dim = obs.shape
+        total_responsibilities = assignments.sum(axis=0).reshape(-1, 1)
+        normalizer = safe_divide(1, total_responsibilities) 
+        means = normalizer * obs.T.dot(assignments).T
+        s = np.tile(obs, (self.n_components, 1, 1)) - np.array([np.tile(mean, (n_obs, 1)) for mean in means])
+        scatter_matrices = s.reshape(self.n_components, obs_dim, n_obs) @ s
+        sufficient_stats = [
+            dict(
+            mean=means[k], 
+            scatter_matrix=scatter_matrices[k], 
+            n_measurements=total_responsibilities[k]) for k in range(self.n_components)
+            ]
+        return sufficient_stats
 
     def predict(self): 
         pass

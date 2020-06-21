@@ -32,15 +32,12 @@ class MixtureDistribution(Distribution):
     def sample(self, size : int = 2): 
         assert size > 1 
 
-        component_labels = [npr.choice(np.arange(self.n_components), size=size, p=self.mixture_weights)]
-        observations = [self.mixture_components[component_labels[0]].sample()]
+        component_labels = npr.choice(np.arange(self.n_components), size=size, p=self.mixture_weights)
+        observations = np.array([self.mixture_components[component_label].sample() for component_label in component_labels])
 
-        for _ in range(size - 1): 
-            component_labels.append(npr.choice(np.arange(self.n_components), size=size, p=self.mixture_weights))
-            observations.append(self.mixture_components[component_labels[-1]].sample())
-        
-        return np.array(observations), np.array(component_labels)
+        return observations, component_labels
     
     def density(self): 
+        # TODO: regular density if they provide component, perhaps vlb if possible? 
         raise NotImplementedError
 

@@ -22,7 +22,7 @@ class UnivariateGaussian(Distribution):
             raise KeyError('Univariate normal must be instantiated with either a variance or a precision')
 
     def __repr__(self): 
-        return self.__class__.__name__ + f"(mean={self.mean}, variance={self.variance}"
+        return self.__class__.__name__ + f"(mean={self.mean}, variance={self.variance})"
     
     @property
     def variance(self): 
@@ -55,6 +55,7 @@ class UnivariateGaussian(Distribution):
 class MultivariateGaussian(Distribution): 
 
     def __init__(self, params : dict): 
+        # TODO: initialize from prior if prior params are given instead of mean and covariance 
         self.mean = params['mean']
         self.dim = self.mean.size
 
@@ -66,7 +67,7 @@ class MultivariateGaussian(Distribution):
             raise KeyError('Multivariate normal must be instantiated with either a covariance or precision')
     
     def __repr__(self): 
-        return self.__class__.__name__ + f"(mean={self.mean}, covariance={self.covariance_}"
+        return self.__class__.__name__ + f"(mean={self.mean}, covariance={self.covariance_})"
 
     @property
     def covariance(self): 
@@ -95,6 +96,7 @@ class MultivariateGaussian(Distribution):
         return normalizer * np.exp(-self.energy(obs))
 
     def energy(self, obs : np.ndarray): 
+        # TODO: 0.5 * mahalanobis(obs, self.mean, self.precision)
         return 0.5 * (obs - self.mean).T.dot(self.precision.dot(obs - self.mean))
 
     def entropy(self): 
@@ -119,7 +121,7 @@ class NormalInverseWishart(Distribution):
         self.posterior_scale_matrix = None
 
     def __repr__(self): 
-        return self.__class__.__name__ + f"(mean={self.mean}, dof={self.dof}, prior measurements={self.prior_measurements}, scale matrix={self.scale_matrix}"
+        return self.__class__.__name__ + f"(mean={self.mean}, dof={self.dof}, prior measurements={self.prior_measurements}, scale matrix={self.scale_matrix})"
 
     @property 
     def mean(self): 
@@ -137,10 +139,10 @@ class NormalInverseWishart(Distribution):
     def scale_matrix(self): 
         return self.posterior_scale_matrix if self.posterior_scale_matrix is not None else self.prior_scale_matrix
 
-    def sample(self, size : int = 1) -> tuple: 
+    def sample(self, size : int = 1, return_dist : bool = False) -> tuple: 
         covariance = InverseWishart(dict(scale_matrix=self.scale_matrix, dof=self.dof)).sample() 
         mean = MultivariateGaussian(dict(mean=self.mean, covariance=covariance/self.measurements)).sample() 
-        return (mean, covariance)
+        return (mean, covariance) if return_dist is False else MultivariateGaussian(dict(mean=mean, covariance=covariance))
 
     def density(self, obs : np.ndarray) -> float: 
         normal_pdf = stats.multivariate_normal.pdf(obs, mean=self.mean, cov=self.scale_matrix)  
@@ -150,6 +152,7 @@ class NormalInverseWishart(Distribution):
     def absorb(self, likelihood : Distribution, sufficient_stats : dict): 
         # TODO: Dangerous, be careful about using the properties like this, remember to test this later 
         # TODO: lmao at this ordering, definitely will need to be tested 
+        # TODO: why does 10.62 in Bishop contradict p.73 of Gelman? 
         assert all(stat in list(sufficient_stats.keys()) for stat in ['scatter_matrix', 'n_measurements', 'mean']), 'insufficient stats provided'
         self.posterior_scale_matrix =  self.scale_matrix + sufficient_stats['scatter_matrix'] + \
                                         ((self.measurements * sufficient_stats['n_measurements']) / (self.measurements + sufficient_stats['n_measurements'])) * \
