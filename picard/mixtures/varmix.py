@@ -83,8 +83,8 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
         precision_scale = hyperpriors['prior_precision_scale'] + N_k
         inv_wishart_dof = hyperpriors['inv_wishart_dof'] + N_k + 1.
         weighted_means = get_weighted_means(q_z, inputs, N_k)
-        covs = update_covs(q_z, inputs, weighted_means, N_k)
         means = update_means(n_components, obs_dim, hyperpriors['prior_precision_scale'], hyperpriors['prior_mean'], N_k, weighted_means, precision_scale)
+        covs = update_covs(q_z, inputs, weighted_means, N_k)
         precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['prior_precision_scale'], covs)
 
         # E step: update the "local" variational distribution parameters

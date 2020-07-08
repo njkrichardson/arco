@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt 
 import numpy as np 
 import numpy.random as npr 
+from scipy.special import digamma
 
 from picard.models.base import Model
 from picard.distributions.base import MixtureDistribution
@@ -65,7 +66,8 @@ class GaussianMixtureModel(Model):
 
     def fit(self, obs : np.ndarray, method : str = 'mean_field_vb'):
         # initialize variational params (TODO: alternative initializations?)
-        n_obs, _ = obs.shape
+        n_obs, obs_dim = obs.shape
+        self.obs_dim = obs_dim
         q_z = np.array([self.prior['mixture_prior'].sample() for _ in range(n_obs)])
 
         if method is 'mean_field_vb': 
@@ -77,8 +79,7 @@ class GaussianMixtureModel(Model):
             
             # E step 
             expected_energy = self._compute_expected_energy(obs)
-            expected_log_det_precision = None 
-            
+            expected_log_det_precision = self._compute_log_det_precision() 
         
         else: 
             raise NotImplementedError
@@ -91,6 +92,22 @@ class GaussianMixtureModel(Model):
                 expected_energy[i][k] = obs_dim * (1/self.prior.n_measurements) + self.prior.dof * mahalanobis(obs[i], self.components[k].mean, self.components[k].covariance)
 
         return expected_energy
+
+    def _compute_log_det_precision(self): 
+        log_det_precisions = [None for _ in range(self.n_components)]
+        for k in range(self.n_components):
+            det_precision = np.linalg.det(self.prior['component_priors'][k].scale_matrix) # TODO: should this be inverse scale matrix? 
+            if det_precision > 1e-30: 
+                log_det = np.log(det_precision)
+            else: 
+                log_det = 0.0
+            log_det_precisions[k] = np.sum([digamma((self.prior['component_priors'][k].dof + 1 - i) / 2.) for i in range(self.obs_dim)]) + self.obs_dim * np.log(2) + log_det
+        return log_det_precisions
+
+    def _compute_expected_log_pi(self, n_k : np.ndarray): 
+        self.prior['mixture_prior'] += n_k 
+        expected_log_pi = digamma(self.likelihood['mixture_weights']) - digamma(self.likelihood['mixture_weights'].concentrations.sum())
+        return expected_log_pi
 
     def collect_sufficient_stats(self, obs : np.ndarray, assignments : np.ndarray): 
         n_obs, obs_dim = obs.shape
