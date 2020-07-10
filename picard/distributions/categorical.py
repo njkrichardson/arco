@@ -26,6 +26,7 @@ class Dirichlet(Distribution):
         return self.__class__.__name__ + f"(concentrations={self.concentrations})"
     
     def sample(self, size : int = 1): 
+        # TODO: 
         return npr.dirichlet(self.concentrations, size=size)[0] if size == 1 else npr.dirichlet(self.concentrations, size=size) 
 
     def density(self, obs : np.ndarray): 

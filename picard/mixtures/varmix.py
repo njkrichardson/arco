@@ -80,17 +80,17 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
     for i in tqdm(range(max_iterations), disable=(not verbose)):
         # M step: update the "global" parameters 
         N_k = q_z.sum(axis=0)
-        precision_scale = hyperpriors['prior_precision_scale'] + N_k
-        inv_wishart_dof = hyperpriors['inv_wishart_dof'] + N_k + 1.
+        precision_scale = hyperpriors['prior_measurements'] + N_k
+        dof = hyperpriors['dof'] + N_k + 1.
         weighted_means = get_weighted_means(q_z, inputs, N_k)
-        means = update_means(n_components, obs_dim, hyperpriors['prior_precision_scale'], hyperpriors['prior_mean'], N_k, weighted_means, precision_scale)
+        means = update_means(n_components, obs_dim, hyperpriors['prior_measurements'], hyperpriors['mean'], N_k, weighted_means, precision_scale)
         covs = update_covs(q_z, inputs, weighted_means, N_k)
-        precisions = update_precisions(n_components, hyperpriors['prior_precision'], weighted_means, N_k, hyperpriors['prior_mean'], obs_dim, hyperpriors['prior_precision_scale'], covs)
+        precisions = update_precisions(n_components, hyperpriors['scale_matrix'], weighted_means, N_k, hyperpriors['mean'], obs_dim, hyperpriors['prior_measurements'], covs)
 
         # E step: update the "local" variational distribution parameters
-        energy = get_energy(inputs, obs_dim, N_k, precision_scale, means, precisions, inv_wishart_dof, n_obs, n_components) #eqn 10.64 Bishop
-        log_det_precision = get_log_det_precisions(precisions, inv_wishart_dof, obs_dim, n_components) #eqn 10.65 Bishop
-        expected_log_pi = get_expected_log_pi(hyperpriors['mixture_concentration'], N_k) #eqn 10.66 Bishop
+        energy = get_energy(inputs, obs_dim, N_k, precision_scale, means, precisions, dof, n_obs, n_components) #eqn 10.64 Bishop
+        log_det_precision = get_log_det_precisions(precisions, dof, obs_dim, n_components) #eqn 10.65 Bishop
+        expected_log_pi = get_expected_log_pi(hyperpriors['concentrations'], N_k) #eqn 10.66 Bishop
         q_z = update_variational_params(obs_dim, expected_log_pi, log_det_precision, energy, n_obs, n_components) #eqn 10.46 Bishop (really 10.46 taken through 10.49)
         
         if verbose is True: 
@@ -107,7 +107,7 @@ def run(inputs : np.ndarray, n_components : int, hyperpriors : dict, verbose : b
                     #add to axes:
                     ax_spatial.add_artist(circ)
                     #make sure components with N_k=0 are not visible:
-                    if N_k[k]<= hyperpriors['mixture_concentration']: means[k] = means[N_k.argmax(),:] #put over point that obviously does have assignments
+                    if N_k[k]<= hyperpriors['concentrations']: means[k] = means[N_k.argmax(),:] #put over point that obviously does have assignments
                 sctZ.set_offsets(means)
                 plt.draw()
                 plt.savefig(os.path.join(RESULTS_DIR, f"{i}.png"))
@@ -172,7 +172,7 @@ def update_means(n_components : int, obs_dim : int, prior_precision_scale : floa
         means[k] = (prior_precision_scale * prior_mean + N_k[k] * weighted_means[k]) / beta_k[k]
     return means 
 
-def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, precision_scale : float, means : np.ndarray, precisions : list, inv_wishart_dof : int, n_obs : int, n_components : int) -> np.ndarray:
+def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, precision_scale : float, means : np.ndarray, precisions : list, dof : int, n_obs : int, n_components : int) -> np.ndarray:
     energy = np.zeros((n_obs, n_components))
     for i in range(n_obs):
         for k in range(n_components):
@@ -180,7 +180,7 @@ def get_energy(inputs : np.ndarray, obs_dim : int, N_k : np.ndarray, precision_s
             B0 = (inputs[i] - means[k]).reshape(obs_dim, 1)
             B1 = np.dot(precisions[k], B0)
             l = np.dot(B0.T, B1)
-            energy[i][k] = A + inv_wishart_dof[k] * l  #shape: (n,k)
+            energy[i][k] = A + dof[k] * l  #shape: (n,k)
     
     return energy
 
@@ -189,7 +189,7 @@ def get_expected_log_pi(mixture_concentration : float, N_k : np.ndarray) -> np.n
     expected_log_pi = digamma(mixture_concentration) - digamma(mixture_concentration.sum())
     return expected_log_pi
 
-def get_log_det_precisions(precisions : list, inv_wishart_dof : int, obs_dim : int, n_components : int) -> list:
+def get_log_det_precisions(precisions : list, dof : int, obs_dim : int, n_components : int) -> list:
     log_det_precisions = [None for _ in range(n_components)]
     for k in range(n_components):
         det_precision = np.linalg.det(precisions[k])
@@ -197,7 +197,7 @@ def get_log_det_precisions(precisions : list, inv_wishart_dof : int, obs_dim : i
             log_det = np.log(det_precision)
         else: 
             log_det = 0.0
-        log_det_precisions[k] = np.sum([digamma((inv_wishart_dof[k] + 1 - i) / 2.) for i in range(obs_dim)]) + obs_dim * np.log(2) + log_det
+        log_det_precisions[k] = np.sum([digamma((dof[k] + 1 - i) / 2.) for i in range(obs_dim)]) + obs_dim * np.log(2) + log_det
     return log_det_precisions
         
 def update_variational_params(obs_dim : int, expected_log_pi : np.ndarray, log_det_precisions : list, energy : np.ndarray, n_obs : int, n_components : int) -> np.ndarray:
@@ -222,17 +222,18 @@ if __name__ == "__main__":
     n_components = 20 
     obs_dim = 2 
     hyperpriors = {
-        'mixture_concentration': 0.1,                     
-        'prior_precision_scale': (1e-20),  
-        'inv_wishart_dof': obs_dim + 1., 
-        'prior_mean': np.zeros(obs_dim), 
-        'prior_precision': np.eye(obs_dim)
+        'concentrations': np.full(n_components, 0.1),                     
+        'prior_measurements': (1e-20),  
+        'dof': obs_dim + 1., 
+        'mean': np.zeros(obs_dim), 
+        'scale_matrix': np.eye(obs_dim)
         }
 
     # run experiment 
     means, log_det_precisions, expected_log_pi, q_z = run(inputs, n_components, hyperpriors, verbose=False)
 
-    # dump parameters 
+    # dump parameters)
+    hyperpriors['concentrations'] = np.full(n_components, 0.1)
     experiment_params = {'hyperpriors': hyperpriors, 'observations': inputs, 'latent_variables': z, 'n_components': n_components}
     save_object(experiment_params, os.path.join(DUMP_DIR, 'gmm.pkl')) 
 

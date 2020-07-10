@@ -1,3 +1,5 @@
+import pickle 
+
 import matplotlib.pyplot as plt 
 import numpy as np 
 import numpy.random as npr 
@@ -8,6 +10,7 @@ from picard.distributions.base import MixtureDistribution
 from picard.distributions.categorical import Categorical, Dirichlet 
 from picard.distributions.gaussian import NormalInverseWishart, MultivariateGaussian
 from picard.utils.linear_algebra import safe_divide, mahalanobis
+from picard.utils.io import load_object
 
 # TODO: Solve the century old inference problem, for now we do bespoke like everyone else 
 # TODO: set a model obs dim, don't infer it during fit 
@@ -21,11 +24,8 @@ from picard.utils.linear_algebra import safe_divide, mahalanobis
 class GaussianMixtureModel(Model): 
 
     def __init__(self, n_components : int, hyperpriors : dict): 
-        self.n_components, self.hyperpriors_ = n_components, hyperpriors
-        self.prior = dict(
-            mixture_prior=Dirichlet(hyperpriors), 
-            component_priors=[NormalInverseWishart(hyperpriors) for _ in range(self.n_components)]
-        )
+        self.prior = dict() 
+        self.n_components, self.hyperpriors = n_components, hyperpriors
         self.initialize_components() # right now, we can only initialize from the prior
 
     def __repr__(self): 
@@ -40,8 +40,8 @@ class GaussianMixtureModel(Model):
         # TODO: things getting sketchy here, need to think about how this should work
         self.hyperpriors_ = hyperpriors
         self.prior['hyperpriors'] = self.hyperpriors_
-        self.prior['mixture_prior'] = Dirichlet(self.hyperpriors_)
-        self.prior['component_priors'] = [NormalInverseWishart(hyperpriors) for _ in range(self.n_components)]
+        self.prior['mixture_prior'] = Dirichlet(self.hyperpriors)
+        self.prior['component_priors'] = [NormalInverseWishart(self.hyperpriors) for _ in range(self.n_components)]
 
     def show(self): 
         pass 
@@ -68,18 +68,20 @@ class GaussianMixtureModel(Model):
         # initialize variational params (TODO: alternative initializations?)
         n_obs, obs_dim = obs.shape
         self.obs_dim = obs_dim
-        q_z = np.array([self.prior['mixture_prior'].sample() for _ in range(n_obs)])
+        q_z = np.array([Dirichlet(dict(concentrations=self.likelihood.mixture_weights)).sample() for _ in range(n_obs)])
 
         if method is 'mean_field_vb': 
             # M step 
             # TODO: use multiple processes 
             sufficient_stats = self.collect_sufficient_stats(obs, q_z)
             for k in range(self.n_components): 
-                self.prior['component_priors'][k].absorb(self.likelihood.mixture_components[k], sufficient_stats[k])
+                self.prior['component_priors'][k].absorb(self.likelihood, sufficient_stats[k])
             
             # E step 
             expected_energy = self._compute_expected_energy(obs)
-            expected_log_det_precision = self._compute_log_det_precision() 
+            expected_log_det_precisions = self._compute_log_det_precision() 
+            expected_log_pi = self._compute_expected_log_pi(sufficient_stats['n_measurements'])
+            q_z = self._update_variational_params(expected_log_pi, expected_log_det_precisions, expected_energy, n_obs)
         
         else: 
             raise NotImplementedError
@@ -89,7 +91,7 @@ class GaussianMixtureModel(Model):
         expected_energy = np.zeros((n_obs, self.n_components))
         for i in range(n_obs): 
             for k in range(self.n_components): 
-                expected_energy[i][k] = obs_dim * (1/self.prior.n_measurements) + self.prior.dof * mahalanobis(obs[i], self.components[k].mean, self.components[k].covariance)
+                expected_energy[i][k] = obs_dim * (1/self.prior[k].n_measurements) + self.prior[k].dof * mahalanobis(obs[i], self.components[k].mean, self.components[k].covariance)
 
         return expected_energy
 
@@ -105,9 +107,19 @@ class GaussianMixtureModel(Model):
         return log_det_precisions
 
     def _compute_expected_log_pi(self, n_k : np.ndarray): 
-        self.prior['mixture_prior'] += n_k 
-        expected_log_pi = digamma(self.likelihood['mixture_weights']) - digamma(self.likelihood['mixture_weights'].concentrations.sum())
+        self.likelihood['mixture_weights'].concentrations += n_k 
+        expected_log_pi = digamma(self.likelihood['mixture_weights'].concentrations) - digamma(self.likelihood['mixture_weights'].concentrations.sum())
         return expected_log_pi
+
+    def _update_variational_params(self, expected_log_pi : np.ndarray, log_det_precisions : list, energy : np.ndarray, n_obs : int) -> np.ndarray:
+        ln_q_z = np.zeros((n_obs, self.n_components))  # ln q_z 
+        for k in range(self.n_components):
+            ln_q_z[:, k] = expected_log_pi[k] + 0.5 * log_det_precisions[k] - 0.5 * self.obs_dim * np.log(2 * np.pi) - 0.5 * energy[:, k]
+
+        #normalise ln Z:
+        ln_q_z -= ln_q_z.max(axis=1).reshape(n_obs, 1)
+        q_z = np.exp(ln_q_z) / np.exp(ln_q_z).sum(axis=1).reshape(n_obs, 1)
+        return q_z
 
     def collect_sufficient_stats(self, obs : np.ndarray, assignments : np.ndarray): 
         n_obs, obs_dim = obs.shape
@@ -128,24 +140,13 @@ class GaussianMixtureModel(Model):
         pass
 
 if __name__ == "__main__":
-    # model parameters 
-    n_components = 3 
-    obs_dim = 2 
+    experiment_params = load_object('/Users/nickrichardson/Desktop/personal/projects/picard/tests/comparators/gmm.pkl') 
 
-    hyperpriors = dict(
-        concentrations=np.ones(n_components),
-        mean=npr.randn(obs_dim),
-        scale_matrix=np.eye(obs_dim), 
-        prior_measurements=5, 
-        dof=obs_dim + 1
-        )
+    x_t = experiment_params['observations']
+    z_t = experiment_params['latent_variables']
+    k = experiment_params['n_components']
+    hyperpriors = experiment_params['hyperpriors']
 
-    gmm = GaussianMixtureModel(n_components=n_components, hyperpriors=hyperpriors)
-    x, z = gmm.sample(1000)
+    gmm = GaussianMixtureModel(n_components=k, hyperpriors=hyperpriors)
+    gmm.fit(x_t)
 
-    gmm.fit(x)
-
-
-    
-
-    
